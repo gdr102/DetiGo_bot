@@ -1,3 +1,4 @@
+import os
 import re
 import html
 import logging
@@ -18,7 +19,8 @@ from app.keyboards.booking_kb import (
 )
 
 router = Router()
-ADMIN_GROUP_ID = -1003871687123
+
+ADMIN_GROUP_ID = int(os.getenv('ADMIN_GROUP_ID'))
 
 # --- ОПЦИИ ---
 WISHES_OPTIONS = {
@@ -87,7 +89,7 @@ async def process_back_step(callback: CallbackQuery, state: FSMContext):
         
     elif current_state == BookingSteps.child_age:
         await state.set_state(BookingSteps.phone)
-        await update_interface(state, "Ваш телефон (Форматы: +7..., 8..., 7...):", get_inline_back_kb())
+        await update_interface(state, "Ваш телефон (Форматы: +7..., 8...):", get_inline_back_kb())
         
     elif current_state == BookingSteps.booking_date:
         await state.set_state(BookingSteps.child_age)
@@ -153,7 +155,7 @@ async def process_name(message: Message, state: FSMContext):
     await state.update_data(name=message.text)
     await state.set_state(BookingSteps.phone)
 
-    await update_interface(state, "Ваш телефон (Форматы: +7..., 8..., 7...):", get_inline_back_kb())
+    await update_interface(state, "Ваш телефон (Форматы: +7..., 8...):", get_inline_back_kb())
 
 @router.message(BookingSteps.phone)
 async def process_phone(message: Message, state: FSMContext):
@@ -171,9 +173,6 @@ async def process_phone(message: Message, state: FSMContext):
         is_valid = True
 
     elif clean_phone.startswith("8") and len(clean_phone) == 11:
-        is_valid = True
-
-    elif clean_phone.startswith("7") and len(clean_phone) == 11:
         is_valid = True
         
     if not is_valid:

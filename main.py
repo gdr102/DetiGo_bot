@@ -8,10 +8,9 @@ from aiogram.client.default import DefaultBotProperties
 from aiogram.types import BotCommand, BotCommandScopeDefault
 
 from dotenv import load_dotenv
+load_dotenv()
 
 from app.handlers import start, booking
-
-load_dotenv()
 
 TOKEN = os.getenv('TOKEN')
 
