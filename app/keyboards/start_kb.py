@@ -5,7 +5,7 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 async def start_kb():
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text='🚗 Забронировать поездку', callback_data='start_booking')],
-        [InlineKeyboardButton(text='📞 Связаться с поддержкой', url='https://t.me/AvtoNanny_VL?direct')]
+        [InlineKeyboardButton(text='📞 Связаться с поддержкой', url='https://t.me/DetiGoSpace?direct')]
     ])
     
     return kb

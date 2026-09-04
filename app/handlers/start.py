@@ -11,8 +11,9 @@ from app.keyboards.start_kb import start_kb, get_sub_check_kb
 router = Router()
 
 # Настройки канала
-CHANNEL_ID = int(os.getenv('CHANNEL_ID'))
-CHANNEL_URL = os.getenv('CHANNEL_URL')
+CHANNEL_ID = int(os.getenv('CHANNEL_ID', 0))
+CHANNEL_URL = os.getenv('CHANNEL_URL', '')
+
 
 async def is_subscribed(bot: Bot, user_id: int, channel_id: int) -> bool:
     """Проверяет, подписан ли пользователь на канал."""

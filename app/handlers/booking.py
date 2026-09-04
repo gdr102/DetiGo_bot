@@ -2,56 +2,61 @@ import os
 import re
 import html
 import logging
+from contextlib import suppress
 
 from aiogram import Router, F, Bot
 from aiogram.fsm.context import FSMContext
-from aiogram.types import Message, CallbackQuery
+from aiogram.types import Message, CallbackQuery, ReplyKeyboardRemove
 from aiogram.exceptions import TelegramBadRequest, TelegramMigrateToChat
-
-from contextlib import suppress
 
 from app.states import BookingSteps
 from app.keyboards.start_kb import start_kb
-
 from app.keyboards.booking_kb import (
     get_age_kb, get_multiselect_kb, 
-    get_confirm_kb, get_inline_back_kb, get_cancel_kb
+    get_confirm_kb, get_inline_back_kb, get_cancel_kb,
+    get_contact_reply_kb, get_schedule_type_kb, get_extra_wishes_kb
 )
 
 router = Router()
 
-ADMIN_GROUP_ID = int(os.getenv('ADMIN_GROUP_ID'))
+ADMIN_GROUP_ID = int(os.getenv('ADMIN_GROUP_ID', 0))
 
-# --- ОПЦИИ ---
-WISHES_OPTIONS = {
-    "meet": "Встретить ребенка",
-    "pickup": "Забрать из помещения",
+# --- ОПЦИИ ДЕТАЛЕЙ ПОЕЗДКИ ---
+MEETING_OPTIONS = {
+    "entrance": "Встретить ребенка у входа в здание и сопроводить до машины",
+    "inside": "Забрать из помещения и проводить до машины",
     "dress": "Помочь переодеться",
-    "other": "Другое"
+    "sign": "Встретить  с табличкой «DeтиGo» (ребенок сразу узнает водителя)",
 }
 
 FEATURES_OPTIONS = {
-    "grunt": "Грунтовая дорога",
-    "morekids": "Более 1 ребенка",
-    "wait": "Ожидание",
-    "extrastop": "Доп. заезд",
-    "other": "Другое"
+    "dirt_road": "В маршруте есть грунтовые дороги (мы учтем это при расчете времени)",
+    "more_kids": "В машине будет более 1 ребенка (подберем просторный автомобиль)",
+    "waiting": "Требуется ожидание (например, нужно подождать, пока закончится занятие)",
+    "extra_stop": "Нужен дополнительный заезд по пути (например, заехать за другим ребенком)",
+    "other": "Другое",
 }
 
-DAYS_OPTIONS = {
+SCHEDULE_OPTIONS = {
     "once": "Разовая поездка",
-    "mon": "Понедельник", "tue": "Вторник", "wed": "Среда",
-    "thu": "Четверг", "fri": "Пятница", "sat": "Суббота", "sun": "Воскресенье"
+    "regular": "Регулярные поездки (по расписанию) – мы обсудим график индивидуально",
 }
 
-# --- УТИЛИТА ИНТЕРФЕЙСА ---
-async def update_interface(state: FSMContext, text: str, reply_markup=None):
+AGE_OPTIONS = {
+    "age_0-3": "0 - 3 года",
+    "age_4-6": "4 - 6 лет",
+    "age_7-10": "7 - 10 лет",
+    "age_11-13": "11 - 13 лет",
+    "age_14+": "14+ лет",
+}
+
+# --- УТИЛИТЫ ИНТЕРФЕЙСА ---
+async def update_interface(bot: Bot, state: FSMContext, text: str, reply_markup=None):
     data = await state.get_data()
     msg_id = data.get("msg_id")
     chat_id = data.get("chat_id")
-    bot: Bot = data.get("bot_instance")
 
-    if msg_id and chat_id and bot:
+    if msg_id and chat_id:
         with suppress(TelegramBadRequest):
             await bot.edit_message_text(
                 chat_id=chat_id,
@@ -59,363 +64,458 @@ async def update_interface(state: FSMContext, text: str, reply_markup=None):
                 text=text,
                 reply_markup=reply_markup
             )
-            return
-        
-    else:
-        pass
+
+async def remove_contact_reply_kb(bot: Bot, chat_id: int, state: FSMContext):
+    data = await state.get_data()
+    contact_prompt_msg_id = data.get("contact_prompt_msg_id")
+    if contact_prompt_msg_id:
+        with suppress(TelegramBadRequest):
+            await bot.delete_message(chat_id=chat_id, message_id=contact_prompt_msg_id)
+        await state.update_data(contact_prompt_msg_id=None)
+
+    with suppress(TelegramBadRequest):
+        msg = await bot.send_message(chat_id, "⏳", reply_markup=ReplyKeyboardRemove())
+        await msg.delete()
+
+async def enter_phone_step(bot: Bot, state: FSMContext, chat_id: int):
+    await state.set_state(BookingSteps.phone)
+    text = (
+        "<b>Контакт для связи.</b>\n\n"
+        "<i>Введите номер в формате: +7/89991234567</i>"
+    )
+    await update_interface(bot, state, text, get_inline_back_kb())
+
+    prompt_msg = await bot.send_message(
+        chat_id=chat_id,
+        text="👇 Вы также можете нажать кнопку ниже, чтобы поделиться контактом:",
+        reply_markup=get_contact_reply_kb()
+    )
+    await state.update_data(contact_prompt_msg_id=prompt_msg.message_id)
 
 # --- Обработчик ОТМЕНЫ ---
 @router.callback_query(F.data == "cancel_booking")
 async def process_cancel(callback: CallbackQuery, state: FSMContext):
+    chat_id = callback.message.chat.id
+    await remove_contact_reply_kb(callback.bot, chat_id, state)
     await state.clear()
 
     first_name = html.escape(callback.from_user.first_name)
-
     await callback.message.edit_text(
         text=f'Привет, {first_name} 👋 Я бот для записи к автоняне 🤖\n\nВыберите действие: 👇',
         reply_markup=await start_kb()
     )
-    
     await callback.answer("Заявка отменена")
 
 # --- Обработчик НАЗАД ---
 @router.callback_query(F.data == "back_step")
 async def process_back_step(callback: CallbackQuery, state: FSMContext):
     current_state = await state.get_state()
-    
+    chat_id = callback.message.chat.id
+    bot = callback.bot
+    data = await state.get_data()
+
     if current_state == BookingSteps.phone:
+        await remove_contact_reply_kb(bot, chat_id, state)
         await state.set_state(BookingSteps.name)
-        await update_interface(state, "Как к Вам обращаться? (Имя родителя)", get_cancel_kb())
-        
-    elif current_state == BookingSteps.child_age:
-        await state.set_state(BookingSteps.phone)
-        await update_interface(state, "Ваш телефон (Форматы: +7..., 8...):", get_inline_back_kb())
-        
+        text = "<b>Как к Вам обращаться</b>?\n\n<i>(Ваше имя)</i>"
+        await update_interface(bot, state, text, get_cancel_kb())
+
     elif current_state == BookingSteps.booking_date:
-        await state.set_state(BookingSteps.child_age)
-        await update_interface(state, "Выберите возраст ребенка:", get_age_kb())
+        await enter_phone_step(bot, state, chat_id)
 
     elif current_state == BookingSteps.booking_time:
         await state.set_state(BookingSteps.booking_date)
-        await update_interface(state, "Удобная дата поездки (дд.мм.гггг):", get_inline_back_kb())
-        
+        text = (
+            "<b>Удобная дата поездки.</b>\n"
+            "Мы подстроимся под Ваш график, даже если он меняется ⏰\n\n"
+            "<i>Введите дату в формате дд.мм.гггг (01.09.2026)</i>"
+        )
+        await update_interface(bot, state, text, get_inline_back_kb())
+
     elif current_state == BookingSteps.route:
         await state.set_state(BookingSteps.booking_time)
-        await update_interface(state, "Удобное время подачи (чч:мм):", get_inline_back_kb())
+        text = (
+            "<b>Удобное время поездки.</b>\n\n"
+            "<i>Введите время в формате чч:мм (10:10)</i>"
+        )
+        await update_interface(bot, state, text, get_inline_back_kb())
 
-    elif current_state == BookingSteps.wishes:
+    elif current_state == BookingSteps.child_age:
         await state.set_state(BookingSteps.route)
-        await update_interface(state, "Укажите маршрут (Откуда → Куда):", get_inline_back_kb())
-        
-    elif current_state == BookingSteps.wishes_comment:
-        await state.set_state(BookingSteps.wishes)
-        data = await state.get_data()
-        selected = data.get("wishes", [])
-        await update_interface(state, "Выберите особые пожелания:", get_multiselect_kb(WISHES_OPTIONS, selected, "wish"))
+        text = (
+            "<b>Маршрут поездки</b>\n"
+            "Укажите адреса: откуда и куда нужно доставить ребенка. "
+            "Если маршрутов несколько – просто перечислите их\n\n"
+            "<i>Пример: Школа 1 → площадь Ленина, 15</i>"
+        )
+        await update_interface(bot, state, text, get_inline_back_kb())
+
+    elif current_state == BookingSteps.meeting_details:
+        await state.set_state(BookingSteps.child_age)
+        text = "<b>Возраст ребенка:</b>"
+        await update_interface(bot, state, text, get_age_kb())
 
     elif current_state == BookingSteps.route_features:
-        await state.set_state(BookingSteps.wishes)
-        data = await state.get_data()
-        selected = data.get("wishes", [])
-        await update_interface(state, "Выберите особые пожелания:", get_multiselect_kb(WISHES_OPTIONS, selected, "wish"))
+        await state.set_state(BookingSteps.meeting_details)
+        selected = data.get("meeting_details", [])
+        text = "<b>Детали поездки</b>\nКак нам встретить Вашего ребенка? 🤝"
+        await update_interface(bot, state, text, get_multiselect_kb(MEETING_OPTIONS, selected, "meet"))
 
-    # Логика возврата из ввода комментария к особенностям
     elif current_state == BookingSteps.features_comment:
         await state.set_state(BookingSteps.route_features)
-        data = await state.get_data()
         selected = data.get("features", [])
-        await update_interface(state, "Особенности маршрута:", get_multiselect_kb(FEATURES_OPTIONS, selected, "feat"))
+        text = "<b>Детали поездки</b>\nДополнительные условия поездки:"
+        await update_interface(bot, state, text, get_multiselect_kb(FEATURES_OPTIONS, selected, "feat"))
 
-    elif current_state == BookingSteps.schedule:
-        await state.set_state(BookingSteps.route_features)
-        data = await state.get_data()
-        selected = data.get("features", [])
-        await update_interface(state, "Особенности маршрута:", get_multiselect_kb(FEATURES_OPTIONS, selected, "feat"))
-        
+    elif current_state == BookingSteps.schedule_type:
+        if "other" in data.get("features", []):
+            await state.set_state(BookingSteps.features_comment)
+            await update_interface(bot, state, "Вы выбрали 'Другое'. Напишите, пожалуйста, комментарий:", get_inline_back_kb())
+        else:
+            await state.set_state(BookingSteps.route_features)
+            selected = data.get("features", [])
+            text = "<b>Детали поездки</b>\nДополнительные условия поездки:"
+            await update_interface(bot, state, text, get_multiselect_kb(FEATURES_OPTIONS, selected, "feat"))
+
+    elif current_state == BookingSteps.extra_wishes:
+        await state.set_state(BookingSteps.schedule_type)
+        text = "<b>Детали поездки</b>\nЭто разовая или регулярная поездка? 🚗"
+        await update_interface(bot, state, text, get_schedule_type_kb())
+
     elif current_state == BookingSteps.check_data:
-        await state.set_state(BookingSteps.schedule)
-        data = await state.get_data()
-        selected = data.get("schedule", [])
-        await update_interface(state, "Заказы по расписанию (дни недели):", get_multiselect_kb(DAYS_OPTIONS, selected, "day"))
+        await state.set_state(BookingSteps.extra_wishes)
+        text = (
+            "<b>Детали поездки</b>\n"
+            "Хотите что-то добавить?\n\n"
+            "Мы учтём любые пожелания: любимая музыка в дороге, аудиокнига, "
+            "игрушка для ребёнка – просто напишите✍️"
+        )
+        await update_interface(bot, state, text, get_extra_wishes_kb())
 
     await callback.answer()
 
-# --- ШАГИ БРОНИРОВАНИЯ ---
+# --- ШАГ 1: ИМЯ ---
 @router.callback_query(F.data == "start_booking")
 async def start_booking_process(callback: CallbackQuery, state: FSMContext):
-    await state.update_data(msg_id=callback.message.message_id, chat_id=callback.message.chat.id, bot_instance=callback.bot)
+    await state.update_data(msg_id=callback.message.message_id, chat_id=callback.message.chat.id)
     await state.set_state(BookingSteps.name)
 
-    await callback.message.edit_text("Как к Вам обращаться? (Имя родителя)", reply_markup=get_cancel_kb())
+    text = "<b>Как к Вам обращаться</b>?\n\n<i>(Ваше имя)</i>"
+    await callback.message.edit_text(text, reply_markup=get_cancel_kb())
 
 @router.message(BookingSteps.name)
 async def process_name(message: Message, state: FSMContext):
-    await message.delete()
+    with suppress(TelegramBadRequest):
+        await message.delete()
 
     await state.update_data(name=message.text)
-    await state.set_state(BookingSteps.phone)
+    await enter_phone_step(message.bot, state, message.chat.id)
 
-    await update_interface(state, "Ваш телефон (Форматы: +7..., 8...):", get_inline_back_kb())
+# --- ШАГ 2: ТЕЛЕФОН ---
+@router.message(BookingSteps.phone, F.contact)
+async def process_phone_contact(message: Message, state: FSMContext):
+    phone_number = message.contact.phone_number
+    if not phone_number.startswith("+"):
+        phone_number = f"+{phone_number}"
+
+    with suppress(TelegramBadRequest):
+        await message.delete()
+
+    await remove_contact_reply_kb(message.bot, message.chat.id, state)
+    await state.update_data(phone=phone_number)
+    await state.set_state(BookingSteps.booking_date)
+
+    text = (
+        "<b>Удобная дата поездки.</b>\n"
+        "Мы подстроимся под Ваш график, даже если он меняется ⏰\n\n"
+        "<i>Введите дату в формате дд.мм.гггг (01.09.2026)</i>"
+    )
+    await update_interface(message.bot, state, text, get_inline_back_kb())
 
 @router.message(BookingSteps.phone)
-async def process_phone(message: Message, state: FSMContext):
-    raw_phone = message.text
-
-    try:
+async def process_phone_text(message: Message, state: FSMContext):
+    raw_phone = message.text or ""
+    with suppress(TelegramBadRequest):
         await message.delete()
-    except:
-        pass
 
     clean_phone = re.sub(r'[^\d+]', '', raw_phone) 
-    
     is_valid = False
     if clean_phone.startswith("+7") and len(clean_phone) == 12:
         is_valid = True
-
     elif clean_phone.startswith("8") and len(clean_phone) == 11:
+        is_valid = True
+    elif clean_phone.startswith("7") and len(clean_phone) == 11:
+        raw_phone = "+" + clean_phone
         is_valid = True
         
     if not is_valid:
-        await update_interface(state, "⚠️ Неверный формат номера.\nПожалуйста, введите номер в формате +79990000000 или 89990000000:", get_inline_back_kb())
-        
+        error_text = (
+            "⚠️ Неверный формат номера.\n\n"
+            "<b>Контакт для связи.</b>\n\n"
+            "<i>Введите номер в формате: +7/89991234567</i>"
+        )
+        await update_interface(message.bot, state, error_text, get_inline_back_kb())
         return
 
+    await remove_contact_reply_kb(message.bot, message.chat.id, state)
     await state.update_data(phone=raw_phone)
-    await state.set_state(BookingSteps.child_age)
-
-    await update_interface(state, "Спасибо! Укажите возраст ребенка:", get_age_kb())
-
-@router.callback_query(F.data.startswith("age_"), BookingSteps.child_age)
-async def process_age(callback: CallbackQuery, state: FSMContext):
-    age_map = {"age_0-3": "0-3 года", "age_4-6": "4-6 лет", "age_7+": "7+ лет"}
-
-    selected_age = age_map.get(callback.data)
-
-    await state.update_data(age=selected_age)
     await state.set_state(BookingSteps.booking_date)
 
-    await update_interface(state, "Удобная дата поездки (дд.мм.гггг):", get_inline_back_kb())
+    text = (
+        "<b>Удобная дата поездки.</b>\n"
+        "Мы подстроимся под Ваш график, даже если он меняется ⏰\n\n"
+        "<i>Введите дату в формате дд.мм.гггг (01.09.2026)</i>"
+    )
+    await update_interface(message.bot, state, text, get_inline_back_kb())
 
-    await callback.answer()
-
+# --- ШАГ 3: ДАТА ---
 @router.message(BookingSteps.booking_date)
 async def process_date(message: Message, state: FSMContext):
-    await message.delete()
+    with suppress(TelegramBadRequest):
+        await message.delete()
 
     await state.update_data(booking_date=message.text)
     await state.set_state(BookingSteps.booking_time)
 
-    await update_interface(state, "Удобное время подачи (чч:мм):", get_inline_back_kb())
+    text = (
+        "<b>Удобное время поездки.</b>\n\n"
+        "<i>Введите время в формате чч:мм (10:10)</i>"
+    )
+    await update_interface(message.bot, state, text, get_inline_back_kb())
 
+# --- ШАГ 4: ВРЕМЯ ---
 @router.message(BookingSteps.booking_time)
 async def process_time(message: Message, state: FSMContext):
-    await message.delete()
+    with suppress(TelegramBadRequest):
+        await message.delete()
 
     await state.update_data(booking_time=message.text)
     await state.set_state(BookingSteps.route)
 
-    await update_interface(state, "Маршрут (Откуда → Куда):", get_inline_back_kb())
+    text = (
+        "<b>Маршрут поездки</b>\n"
+        "Укажите адреса: откуда и куда нужно доставить ребенка. "
+        "Если маршрутов несколько – просто перечислите их\n\n"
+        "<i>Пример: Школа 1 → площадь Ленина, 15</i>"
+    )
+    await update_interface(message.bot, state, text, get_inline_back_kb())
 
+# --- ШАГ 5: МАРШРУТ ---
 @router.message(BookingSteps.route)
 async def process_route(message: Message, state: FSMContext):
-    await message.delete()
+    with suppress(TelegramBadRequest):
+        await message.delete()
 
     await state.update_data(route=message.text)
-    await state.update_data(wishes=[]) 
-    await state.set_state(BookingSteps.wishes)
+    await state.set_state(BookingSteps.child_age)
 
-    await update_interface(state, "Особые пожелания (можно выбрать несколько):", get_multiselect_kb(WISHES_OPTIONS, [], "wish"))
+    text = "<b>Возраст ребенка:</b>"
+    await update_interface(message.bot, state, text, get_age_kb())
 
-@router.callback_query(F.data.startswith("wish_"), BookingSteps.wishes)
-async def process_wishes_select(callback: CallbackQuery, state: FSMContext):
+# --- ШАГ 6: ВОЗРАСТ РЕБЕНКА ---
+@router.callback_query(F.data.startswith("age_"), BookingSteps.child_age)
+async def process_age(callback: CallbackQuery, state: FSMContext):
+    selected_age = AGE_OPTIONS.get(callback.data, callback.data)
+    await state.update_data(age=selected_age)
+    await state.update_data(meeting_details=[])
+    await state.set_state(BookingSteps.meeting_details)
+
+    text = "<b>Детали поездки</b>\nКак нам встретить Вашего ребенка? 🤝"
+    await update_interface(callback.bot, state, text, get_multiselect_kb(MEETING_OPTIONS, [], "meet"))
+    await callback.answer()
+
+# --- ШАГ 7: ДЕТАЛИ - КАК ВСТРЕТИТЬ РЕБЕНКА ---
+@router.callback_query(F.data.startswith("meet_"), BookingSteps.meeting_details)
+async def process_meeting_select(callback: CallbackQuery, state: FSMContext):
     action = callback.data.split("_", 1)[1]
     data = await state.get_data()
-    selected = data.get("wishes", [])
+    selected = data.get("meeting_details", [])
 
     if action == "done":
-        if "other" in selected:
-            await state.set_state(BookingSteps.wishes_comment)
-            await update_interface(state, "Вы выбрали 'Другое'. Напишите, пожалуйста, комментарий:", get_inline_back_kb())
-        
-        else:
-            await state.update_data(features=[])
-            await state.set_state(BookingSteps.route_features)
-            await update_interface(state, "Особенности маршрута:", get_multiselect_kb(FEATURES_OPTIONS, [], "feat"))
-    
+        await state.update_data(features=[])
+        await state.set_state(BookingSteps.route_features)
+        text = "<b>Детали поездки</b>\nДополнительные условия поездки:"
+        await update_interface(callback.bot, state, text, get_multiselect_kb(FEATURES_OPTIONS, [], "feat"))
     else:
         if action in selected:
             selected.remove(action)
-        
         else:
             selected.append(action)
-        
-        await state.update_data(wishes=selected)
 
+        await state.update_data(meeting_details=selected)
         with suppress(TelegramBadRequest):
-            await callback.message.edit_reply_markup(reply_markup=get_multiselect_kb(WISHES_OPTIONS, selected, "wish"))
-    
+            await callback.message.edit_reply_markup(
+                reply_markup=get_multiselect_kb(MEETING_OPTIONS, selected, "meet")
+            )
     await callback.answer()
 
-@router.message(BookingSteps.wishes_comment)
-async def process_wishes_comment(message: Message, state: FSMContext):
-    await message.delete()
-
-    await state.update_data(other_comment=message.text)
-    await state.update_data(features=[])
-    await state.set_state(BookingSteps.route_features)
-
-    await update_interface(state, "Особенности маршрута:", get_multiselect_kb(FEATURES_OPTIONS, [], "feat"))
-
+# --- ШАГ 8: ДЕТАЛИ - ДОПОЛНИТЕЛЬНЫЕ УСЛОВИЯ ---
 @router.callback_query(F.data.startswith("feat_"), BookingSteps.route_features)
 async def process_features_select(callback: CallbackQuery, state: FSMContext):
-    action = callback.data.split("_", 1)[1] 
+    action = callback.data.split("_", 1)[1]
     data = await state.get_data()
     selected = data.get("features", [])
 
     if action == "done":
-        # Проверяем, выбрано ли "Другое"
         if "other" in selected:
-             await state.set_state(BookingSteps.features_comment)
-             await update_interface(state, "Вы выбрали 'Другое'. Напишите, пожалуйста, комментарий:", get_inline_back_kb())
-
+            await state.set_state(BookingSteps.features_comment)
+            await update_interface(
+                callback.bot,
+                state,
+                "Вы выбрали 'Другое'. Напишите, пожалуйста, комментарий:",
+                get_inline_back_kb()
+            )
         else:
-            await state.update_data(schedule=[])
-            await state.set_state(BookingSteps.schedule)
-            await update_interface(state, "Заказы по расписанию (дни недели):", get_multiselect_kb(DAYS_OPTIONS, [], "day"))
-
+            await state.set_state(BookingSteps.schedule_type)
+            text = "<b>Детали поездки</b>\nЭто разовая или регулярная поездка? 🚗"
+            await update_interface(callback.bot, state, text, get_schedule_type_kb())
     else:
         if action in selected:
             selected.remove(action)
-
         else:
             selected.append(action)
-        
-        await state.update_data(features=selected)
 
+        await state.update_data(features=selected)
         with suppress(TelegramBadRequest):
-            await callback.message.edit_reply_markup(reply_markup=get_multiselect_kb(FEATURES_OPTIONS, selected, "feat"))
-            
+            await callback.message.edit_reply_markup(
+                reply_markup=get_multiselect_kb(FEATURES_OPTIONS, selected, "feat")
+            )
     await callback.answer()
 
 @router.message(BookingSteps.features_comment)
 async def process_features_comment(message: Message, state: FSMContext):
-    await message.delete()
+    with suppress(TelegramBadRequest):
+        await message.delete()
 
     await state.update_data(features_other_comment=message.text)
-    await state.update_data(schedule=[])
-    await state.set_state(BookingSteps.schedule)
+    await state.set_state(BookingSteps.schedule_type)
 
-    await update_interface(state, "Заказы по расписанию (дни недели):", get_multiselect_kb(DAYS_OPTIONS, [], "day"))
+    text = "<b>Детали поездки</b>\nЭто разовая или регулярная поездка? 🚗"
+    await update_interface(message.bot, state, text, get_schedule_type_kb())
 
-@router.callback_query(F.data.startswith("day_"), BookingSteps.schedule)
-async def process_schedule_select(callback: CallbackQuery, state: FSMContext):
-    action = callback.data.split("_", 1)[1]
-    data = await state.get_data()
-    selected = data.get("schedule", [])
+# --- ШАГ 9: ДЕТАЛИ - РАЗОВАЯ ИЛИ РЕГУЛЯРНАЯ ---
+@router.callback_query(F.data.startswith("sched_"), BookingSteps.schedule_type)
+async def process_schedule_type(callback: CallbackQuery, state: FSMContext):
+    sched_key = callback.data.split("_", 1)[1]
+    schedule_text = SCHEDULE_OPTIONS.get(sched_key, "Разовая поездка")
+    await state.update_data(schedule_type=schedule_text)
+    await state.set_state(BookingSteps.extra_wishes)
 
-    if action == "done":
-        final_data = await state.get_data()
-        text_result = generate_user_summary_text(final_data)
-        
-        await state.set_state(BookingSteps.check_data)
-
-        await update_interface(state, text_result, get_confirm_kb())
-    else:
-        if action in selected:
-            selected.remove(action)
-
-        else:
-            selected.append(action)
-        
-        await state.update_data(schedule=selected)
-        
-        with suppress(TelegramBadRequest):
-            await callback.message.edit_reply_markup(reply_markup=get_multiselect_kb(DAYS_OPTIONS, selected, "day"))
-            
+    text = (
+        "<b>Детали поездки</b>\n"
+        "Хотите что-то добавить?\n\n"
+        "Мы учтём любые пожелания: любимая музыка в дороге, аудиокнига, "
+        "игрушка для ребёнка – просто напишите✍️"
+    )
+    await update_interface(callback.bot, state, text, get_extra_wishes_kb())
     await callback.answer()
 
-# --- ФУНКЦИИ ГЕНЕРАЦИИ ТЕКСТА (HTML) ---
+# --- ШАГ 10: ДЕТАЛИ - ДОПОЛНИТЕЛЬНЫЕ ПОЖЕЛАНИЯ ---
+async def show_confirmation_screen(bot: Bot, state: FSMContext):
+    await state.set_state(BookingSteps.check_data)
+    final_data = await state.get_data()
+    text_result = generate_user_summary_text(final_data)
+    await update_interface(bot, state, text_result, get_confirm_kb())
+
+@router.callback_query(F.data == "skip_extra_wishes", BookingSteps.extra_wishes)
+async def process_skip_extra_wishes(callback: CallbackQuery, state: FSMContext):
+    await state.update_data(extra_wishes="Нет")
+    await show_confirmation_screen(callback.bot, state)
+    await callback.answer()
+
+@router.message(BookingSteps.extra_wishes)
+async def process_extra_wishes_text(message: Message, state: FSMContext):
+    with suppress(TelegramBadRequest):
+        await message.delete()
+
+    await state.update_data(extra_wishes=message.text)
+    await show_confirmation_screen(message.bot, state)
+
+# --- ШАГ 11: ФОРМИРОВАНИЕ ТЕКСТА СВОДКИ И ОТПРАВКА ---
 def get_data_strings(data: dict):
-    # Пожелания
-    wishes_list = [WISHES_OPTIONS.get(w, w) for w in data.get("wishes", [])]
-    wishes_str = ", ".join(wishes_list)
+    # Как встретить
+    meeting_list = [MEETING_OPTIONS.get(m, m) for m in data.get("meeting_details", [])]
+    meeting_str = ", ".join(meeting_list) or "Стандартно"
 
-    if "other_comment" in data:
-        wishes_str += f" (Комментарий: {html.escape(data['other_comment'])})"
-
-    if not wishes_str: wishes_str = "Нет"
-
-    # Особенности
+    # Дополнительные условия
     features_list = [FEATURES_OPTIONS.get(f, f) for f in data.get("features", [])]
     features_str = ", ".join(features_list)
-
     if "features_other_comment" in data:
         features_str += f" (Комментарий: {html.escape(data['features_other_comment'])})"
+    if not features_str:
+        features_str = "Нет"
 
-    if not features_str: features_str = "Нет"
-    
-    # Расписание
-    schedule_list = [DAYS_OPTIONS.get(d, d) for d in data.get("schedule", [])]
-    schedule_str = ", ".join(schedule_list) or "Разовая поездка"
-    
-    return wishes_str, features_str, schedule_str
+    # Тип поездки
+    schedule_str = data.get("schedule_type", "Разовая поездка")
+
+    # Дополнительные пожелания
+    extra_wishes_str = html.escape(str(data.get("extra_wishes", "Нет")))
+
+    return meeting_str, features_str, schedule_str, extra_wishes_str
 
 def generate_user_summary_text(data: dict) -> str:
-    wishes_str, features_str, schedule_str = get_data_strings(data)
+    meeting_str, features_str, schedule_str, extra_wishes_str = get_data_strings(data)
     
     return (
         f"✅ <b>Проверьте данные заявки:</b>\n"
         f"👤 <b>Имя:</b> {html.escape(str(data.get('name')))}\n"
         f"📞 <b>Телефон:</b> {html.escape(str(data.get('phone')))}\n"
-        f"👶 <b>Возраст:</b> {data.get('age')}\n"
         f"📅 <b>Дата:</b> {html.escape(str(data.get('booking_date')))} в {html.escape(str(data.get('booking_time')))}\n"
-        f"🚗 <b>Маршрут:</b> {html.escape(str(data.get('route')))}\n\n"
-        f"✨ <b>Пожелания:</b> {wishes_str}\n"
-        f"⚠️ <b>Особенности:</b> {features_str}\n"
-        f"🗓 <b>Расписание:</b> {schedule_str}\n\n"
-        f"ℹ️ <b>Важно:</b>\n"
-        f"• Фиксируем маршрут через 2GIS\n"
-        f"• Сумма меняется при доп. ожидании, смене маршрута или доп. опциях (вода 0,33л - 60₽)\n"
-        f"• Зарядка в машине бесплатно\n\n"
-        f"💡 <b>Обратите внимание:</b>\n"
-        f"• Оплата только за путь с ребенком.\n"
-        f"• Подача авто не оплачивается.\n"
-        f"• Доплата от +150₽ за отдаленные районы (>10км от центра)."
+        f"🚗 <b>Маршрут:</b> {html.escape(str(data.get('route')))}\n"
+        f"👶 <b>Возраст ребенка:</b> {html.escape(str(data.get('age')))}\n\n"
+        f"🤝 <b>Встреча:</b> {meeting_str}\n"
+        f"⚠️ <b>Условия:</b> {features_str}\n"
+        f"🗓 <b>Поездка:</b> {schedule_str}\n"
+        f"✍️ <b>Дополнительно:</b> {extra_wishes_str}\n\n"
+        f"<blockquote expandable>"
+        f"✨ Что мы предусмотрели для Вашего комфорта:\n\n"
+        f"• Зарядка для телефона — всегда в машине\n"
+        f"• Детская вода — по вашему желанию\n"
+        f"• Маршрут фиксируем по 2GIS/Google Maps для точности\n"
+        f"• Стоимость поездки фиксирована и меняется только если Вы просите подождать или меняете маршрут\n\n"
+        f"💳 Как мы считаем стоимость:\n\n"
+        f"• Вы платите только за путь с ребёнком в машине\n"
+        f"• Дорога няни до Вас и обратно — не оплачивается\n"
+        f"• Цена фиксирована, без скрытых надбавок\n"
+        f"• Для поездок за город (свыше 10 км) — предусмотрена доплата, о которой мы предупредим заранее\n\n"
+        f"Всё прозрачно, Вы всегда знаете, за что платите\n\n"
+        f"Остались вопросы? Мы всегда на связи 🤝"
+        f"</blockquote>"
     )
 
 def generate_admin_text(data: dict, user_data) -> str:
-    wishes_str, features_str, schedule_str = get_data_strings(data)
+    meeting_str, features_str, schedule_str, extra_wishes_str = get_data_strings(data)
     
     return (
         f"📩 <b>НОВАЯ ЗАЯВКА</b>\n"
         f"👤 <a href='tg://user?id={user_data.id}'>{html.escape(user_data.full_name)}</a> (@{html.escape(str(user_data.username)) if user_data.username else 'нет'})\n\n"
         f"<b>Имя:</b> {html.escape(str(data.get('name')))}\n"
         f"<b>Телефон:</b> {html.escape(str(data.get('phone')))}\n"
-        f"<b>Ребенок:</b> {data.get('age')}\n"
-        f"<b>Дата:</b> {html.escape(str(data.get('booking_date')))} {html.escape(str(data.get('booking_time')))}\n"
-        f"<b>Маршрут:</b> {html.escape(str(data.get('route')))}\n\n"
-        f"<b>Пожелания:</b> {wishes_str}\n"
-        f"<b>Особенности:</b> {features_str}\n"
-        f"<b>Расписание:</b> {schedule_str}"
+        f"<b>Дата и время:</b> {html.escape(str(data.get('booking_date')))} в {html.escape(str(data.get('booking_time')))}\n"
+        f"<b>Маршрут:</b> {html.escape(str(data.get('route')))}\n"
+        f"<b>Возраст ребенка:</b> {html.escape(str(data.get('age')))}\n\n"
+        f"<b>Встреча:</b> {meeting_str}\n"
+        f"<b>Условия:</b> {features_str}\n"
+        f"<b>Поездка:</b> {schedule_str}\n"
+        f"<b>Дополнительно:</b> {extra_wishes_str}"
     )
 
 @router.callback_query(F.data == "restart_booking", BookingSteps.check_data)
 async def restart_booking(callback: CallbackQuery, state: FSMContext):
     msg_id = callback.message.message_id
     chat_id = callback.message.chat.id
-    bot = callback.bot
     
     await state.clear()
-    await state.update_data(msg_id=msg_id, chat_id=chat_id, bot_instance=bot)
+    await state.update_data(msg_id=msg_id, chat_id=chat_id)
     await state.set_state(BookingSteps.name)
     
-    await callback.message.edit_text("Данные сброшены.\nКак к Вам обращаться? (Имя родителя)", reply_markup=get_cancel_kb())
+    text = "Данные сброшены.\n\n<b>Как к Вам обращаться</b>?\n\n<i>(Ваше имя)</i>"
+    await callback.message.edit_text(text, reply_markup=get_cancel_kb())
     await callback.answer()
 
 @router.callback_query(F.data == "confirm_booking", BookingSteps.check_data)
 async def confirm_booking(callback: CallbackQuery, state: FSMContext):
     data = await state.get_data()
-    
     admin_text = generate_admin_text(data, callback.from_user)
     
     try:
@@ -427,11 +527,10 @@ async def confirm_booking(callback: CallbackQuery, state: FSMContext):
 
         try:
             await callback.bot.send_message(chat_id=new_id, text=admin_text)
-
         except Exception as e2:
-             logging.error(f"Failed to send to new group ID: {e2}")
-             await callback.answer("Ошибка отправки заявки администратору.", show_alert=True)
-             return
+            logging.error(f"Failed to send to new group ID: {e2}")
+            await callback.answer("Ошибка отправки заявки администратору.", show_alert=True)
+            return
              
     except Exception as e:
         logging.error(f"Admin send error: {e}")
@@ -442,7 +541,6 @@ async def confirm_booking(callback: CallbackQuery, state: FSMContext):
         "✅ <b>Заявка успешно отправлена!</b>\n\nСкоро с вами свяжется оператор для подтверждения.",
         reply_markup=None
     )
-
     await state.clear()
-    
     await callback.answer()
+
