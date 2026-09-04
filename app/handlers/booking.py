@@ -115,10 +115,16 @@ async def process_back_step(callback: CallbackQuery, state: FSMContext):
     data = await state.get_data()
 
     if current_state == BookingSteps.phone:
+        old_msg_id = data.get("msg_id")
+        if old_msg_id:
+            with suppress(TelegramBadRequest):
+                await bot.delete_message(chat_id=chat_id, message_id=old_msg_id)
         await remove_contact_reply_kb(bot, chat_id)
         await state.set_state(BookingSteps.name)
         text = "<b>Как к Вам обращаться</b>?\n\n<i>(Ваше имя)</i>"
-        await update_interface(bot, state, text, get_cancel_kb())
+        new_msg = await bot.send_message(chat_id=chat_id, text=text, reply_markup=get_cancel_kb())
+        await state.update_data(msg_id=new_msg.message_id, chat_id=chat_id)
+
 
 
     elif current_state == BookingSteps.booking_date:
@@ -217,13 +223,26 @@ async def process_name(message: Message, state: FSMContext):
 async def process_phone_back(message: Message, state: FSMContext):
     chat_id = message.chat.id
     bot = message.bot
+    data = await state.get_data()
+    old_msg_id = data.get("msg_id")
+
     with suppress(TelegramBadRequest):
         await message.delete()
 
+    if old_msg_id:
+        with suppress(TelegramBadRequest):
+            await bot.delete_message(chat_id=chat_id, message_id=old_msg_id)
+
     await remove_contact_reply_kb(bot, chat_id)
     await state.set_state(BookingSteps.name)
+
     text = "<b>Как к Вам обращаться</b>?\n\n<i>(Ваше имя)</i>"
-    await update_interface(bot, state, text, get_cancel_kb())
+    new_msg = await bot.send_message(
+        chat_id=chat_id,
+        text=text,
+        reply_markup=get_cancel_kb()
+    )
+    await state.update_data(msg_id=new_msg.message_id, chat_id=chat_id)
 
 @router.message(BookingSteps.phone, F.contact)
 async def process_phone_contact(message: Message, state: FSMContext):
@@ -231,10 +250,19 @@ async def process_phone_contact(message: Message, state: FSMContext):
     if not phone_number.startswith("+"):
         phone_number = f"+{phone_number}"
 
+    chat_id = message.chat.id
+    bot = message.bot
+    data = await state.get_data()
+    old_msg_id = data.get("msg_id")
+
     with suppress(TelegramBadRequest):
         await message.delete()
 
-    await remove_contact_reply_kb(message.bot, message.chat.id)
+    if old_msg_id:
+        with suppress(TelegramBadRequest):
+            await bot.delete_message(chat_id=chat_id, message_id=old_msg_id)
+
+    await remove_contact_reply_kb(bot, chat_id)
     await state.update_data(phone=phone_number)
     await state.set_state(BookingSteps.booking_date)
 
@@ -243,11 +271,21 @@ async def process_phone_contact(message: Message, state: FSMContext):
         "Мы подстроимся под Ваш график, даже если он меняется ⏰\n\n"
         "<i>Введите дату в формате дд.мм.гггг (01.09.2026)</i>"
     )
-    await update_interface(message.bot, state, text, get_inline_back_kb())
+    new_msg = await bot.send_message(
+        chat_id=chat_id,
+        text=text,
+        reply_markup=get_inline_back_kb()
+    )
+    await state.update_data(msg_id=new_msg.message_id, chat_id=chat_id)
 
 @router.message(BookingSteps.phone)
 async def process_phone_text(message: Message, state: FSMContext):
     raw_phone = message.text or ""
+    chat_id = message.chat.id
+    bot = message.bot
+    data = await state.get_data()
+    old_msg_id = data.get("msg_id")
+
     with suppress(TelegramBadRequest):
         await message.delete()
 
@@ -268,10 +306,20 @@ async def process_phone_text(message: Message, state: FSMContext):
             "<i>Введите номер в формате: +7/89991234567</i>\n\n"
             "👇 Вы также можете нажать кнопку ниже, чтобы поделиться контактом:"
         )
-        await update_interface(message.bot, state, error_text)
+        if old_msg_id:
+            with suppress(TelegramBadRequest):
+                await bot.edit_message_text(
+                    chat_id=chat_id,
+                    message_id=old_msg_id,
+                    text=error_text
+                )
         return
 
-    await remove_contact_reply_kb(message.bot, message.chat.id)
+    if old_msg_id:
+        with suppress(TelegramBadRequest):
+            await bot.delete_message(chat_id=chat_id, message_id=old_msg_id)
+
+    await remove_contact_reply_kb(bot, chat_id)
     await state.update_data(phone=raw_phone)
     await state.set_state(BookingSteps.booking_date)
 
@@ -280,7 +328,13 @@ async def process_phone_text(message: Message, state: FSMContext):
         "Мы подстроимся под Ваш график, даже если он меняется ⏰\n\n"
         "<i>Введите дату в формате дд.мм.гггг (01.09.2026)</i>"
     )
-    await update_interface(message.bot, state, text, get_inline_back_kb())
+    new_msg = await bot.send_message(
+        chat_id=chat_id,
+        text=text,
+        reply_markup=get_inline_back_kb()
+    )
+    await state.update_data(msg_id=new_msg.message_id, chat_id=chat_id)
+
 
 
 # --- ШАГ 3: ДАТА ---
