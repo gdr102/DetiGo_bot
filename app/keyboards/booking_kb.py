@@ -28,10 +28,14 @@ def get_inline_back_kb() -> InlineKeyboardMarkup:
 # --- Кнопка "Поделиться номером" (Reply) ---
 def get_contact_reply_kb() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
-        keyboard=[[KeyboardButton(text="📱 Поделиться номером", request_contact=True)]],
+        keyboard=[
+            [KeyboardButton(text="📱 Поделиться номером", request_contact=True)],
+            [KeyboardButton(text="⬅️ Назад")]
+        ],
         resize_keyboard=True,
         one_time_keyboard=True
     )
+
 
 # --- Возраст ---
 def get_age_kb() -> InlineKeyboardMarkup:

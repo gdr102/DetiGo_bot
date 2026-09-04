@@ -65,38 +65,38 @@ async def update_interface(bot: Bot, state: FSMContext, text: str, reply_markup=
                 reply_markup=reply_markup
             )
 
-async def remove_contact_reply_kb(bot: Bot, chat_id: int, state: FSMContext):
-    data = await state.get_data()
-    contact_prompt_msg_id = data.get("contact_prompt_msg_id")
-    if contact_prompt_msg_id:
-        with suppress(TelegramBadRequest):
-            await bot.delete_message(chat_id=chat_id, message_id=contact_prompt_msg_id)
-        await state.update_data(contact_prompt_msg_id=None)
-
+async def remove_contact_reply_kb(bot: Bot, chat_id: int):
     with suppress(TelegramBadRequest):
         msg = await bot.send_message(chat_id, "⏳", reply_markup=ReplyKeyboardRemove())
         await msg.delete()
 
 async def enter_phone_step(bot: Bot, state: FSMContext, chat_id: int):
     await state.set_state(BookingSteps.phone)
+    data = await state.get_data()
+    old_msg_id = data.get("msg_id")
+
+    if old_msg_id:
+        with suppress(TelegramBadRequest):
+            await bot.delete_message(chat_id=chat_id, message_id=old_msg_id)
+
     text = (
         "<b>Контакт для связи.</b>\n\n"
-        "<i>Введите номер в формате: +7/89991234567</i>"
+        "<i>Введите номер в формате: +7/89991234567</i>\n\n"
+        "👇 Вы также можете нажать кнопку ниже, чтобы поделиться контактом:"
     )
-    await update_interface(bot, state, text, get_inline_back_kb())
-
-    prompt_msg = await bot.send_message(
+    new_msg = await bot.send_message(
         chat_id=chat_id,
-        text="👇 Вы также можете нажать кнопку ниже, чтобы поделиться контактом:",
+        text=text,
         reply_markup=get_contact_reply_kb()
     )
-    await state.update_data(contact_prompt_msg_id=prompt_msg.message_id)
+    await state.update_data(msg_id=new_msg.message_id)
+
 
 # --- Обработчик ОТМЕНЫ ---
 @router.callback_query(F.data == "cancel_booking")
 async def process_cancel(callback: CallbackQuery, state: FSMContext):
     chat_id = callback.message.chat.id
-    await remove_contact_reply_kb(callback.bot, chat_id, state)
+    await remove_contact_reply_kb(callback.bot, chat_id)
     await state.clear()
 
     first_name = html.escape(callback.from_user.first_name)
@@ -115,10 +115,11 @@ async def process_back_step(callback: CallbackQuery, state: FSMContext):
     data = await state.get_data()
 
     if current_state == BookingSteps.phone:
-        await remove_contact_reply_kb(bot, chat_id, state)
+        await remove_contact_reply_kb(bot, chat_id)
         await state.set_state(BookingSteps.name)
         text = "<b>Как к Вам обращаться</b>?\n\n<i>(Ваше имя)</i>"
         await update_interface(bot, state, text, get_cancel_kb())
+
 
     elif current_state == BookingSteps.booking_date:
         await enter_phone_step(bot, state, chat_id)
@@ -212,6 +213,18 @@ async def process_name(message: Message, state: FSMContext):
     await enter_phone_step(message.bot, state, message.chat.id)
 
 # --- ШАГ 2: ТЕЛЕФОН ---
+@router.message(BookingSteps.phone, F.text == "⬅️ Назад")
+async def process_phone_back(message: Message, state: FSMContext):
+    chat_id = message.chat.id
+    bot = message.bot
+    with suppress(TelegramBadRequest):
+        await message.delete()
+
+    await remove_contact_reply_kb(bot, chat_id)
+    await state.set_state(BookingSteps.name)
+    text = "<b>Как к Вам обращаться</b>?\n\n<i>(Ваше имя)</i>"
+    await update_interface(bot, state, text, get_cancel_kb())
+
 @router.message(BookingSteps.phone, F.contact)
 async def process_phone_contact(message: Message, state: FSMContext):
     phone_number = message.contact.phone_number
@@ -221,7 +234,7 @@ async def process_phone_contact(message: Message, state: FSMContext):
     with suppress(TelegramBadRequest):
         await message.delete()
 
-    await remove_contact_reply_kb(message.bot, message.chat.id, state)
+    await remove_contact_reply_kb(message.bot, message.chat.id)
     await state.update_data(phone=phone_number)
     await state.set_state(BookingSteps.booking_date)
 
@@ -252,12 +265,13 @@ async def process_phone_text(message: Message, state: FSMContext):
         error_text = (
             "⚠️ Неверный формат номера.\n\n"
             "<b>Контакт для связи.</b>\n\n"
-            "<i>Введите номер в формате: +7/89991234567</i>"
+            "<i>Введите номер в формате: +7/89991234567</i>\n\n"
+            "👇 Вы также можете нажать кнопку ниже, чтобы поделиться контактом:"
         )
-        await update_interface(message.bot, state, error_text, get_inline_back_kb())
+        await update_interface(message.bot, state, error_text)
         return
 
-    await remove_contact_reply_kb(message.bot, message.chat.id, state)
+    await remove_contact_reply_kb(message.bot, message.chat.id)
     await state.update_data(phone=raw_phone)
     await state.set_state(BookingSteps.booking_date)
 
@@ -267,6 +281,7 @@ async def process_phone_text(message: Message, state: FSMContext):
         "<i>Введите дату в формате дд.мм.гггг (01.09.2026)</i>"
     )
     await update_interface(message.bot, state, text, get_inline_back_kb())
+
 
 # --- ШАГ 3: ДАТА ---
 @router.message(BookingSteps.booking_date)
