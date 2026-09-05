@@ -73,12 +73,13 @@ def get_schedule_type_kb() -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
     kb.button(text="Разовая поездка", callback_data="sched_once")
     kb.button(
-        text="Регулярные поездки (по расписанию) – мы обсудим график индивидуально",
+        text="Регулярные поездки – мы обсудим график индивидуально",
         callback_data="sched_regular"
     )
     kb.button(text="⬅️ Назад", callback_data="back_step")
     kb.adjust(1)
     return kb.as_markup()
+
 
 # --- Шаг дополнительных пожеланий (Пропустить / Назад) ---
 def get_extra_wishes_kb() -> InlineKeyboardMarkup:
